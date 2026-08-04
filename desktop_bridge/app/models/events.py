@@ -53,3 +53,33 @@ class BridgeEvent(BaseModel):
             task_id=task_id,
             payload=payload,
         )
+
+    @classmethod
+    def approval_requested(
+        cls,
+        *,
+        session_id: str,
+        task_id: str | None,
+        payload: dict[str, Any],
+    ) -> "BridgeEvent":
+        return cls._build(
+            event_type="approval.requested",
+            session_id=session_id,
+            task_id=task_id,
+            payload=payload,
+        )
+
+    @classmethod
+    def approval_resolved(
+        cls,
+        *,
+        session_id: str,
+        task_id: str | None,
+        payload: dict[str, Any],
+    ) -> "BridgeEvent":
+        return cls._build(
+            event_type="approval.resolved",
+            session_id=session_id,
+            task_id=task_id,
+            payload=payload,
+        )

@@ -16,5 +16,15 @@ class InMemoryWorkspaceStore:
     def list(self) -> list[WorkspaceRecord]:
         return list(self._workspaces.values())
 
+    def ensure_within_workspace(self, workspace_id: str, candidate_path: str) -> Path:
+        workspace = self.get(workspace_id)
+        if workspace is None:
+            raise ValueError("Workspace not found")
+        root = workspace.resolved_root()
+        candidate = Path(candidate_path).resolve()
+        if candidate != root and root not in candidate.parents:
+            raise ValueError("Path escapes the authorized workspace")
+        return candidate
+
 
 workspace_store = InMemoryWorkspaceStore()

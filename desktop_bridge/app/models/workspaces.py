@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from typing import Literal
 
+from pathlib import Path
+
 from pydantic import BaseModel
 
 
@@ -17,6 +19,9 @@ class WorkspaceRecord(BaseModel):
     is_enabled: bool
     created_at: datetime
     updated_at: datetime
+
+    def resolved_root(self) -> Path:
+        return Path(self.absolute_path).resolve()
 
     @classmethod
     def sample(cls, *, absolute_path: str) -> "WorkspaceRecord":

@@ -28,6 +28,7 @@ class SessionRecord(BaseModel):
     updated_at: datetime
     last_message_at: datetime | None = None
     active_task_id: str | None = None
+    pending_approval_id: str | None = None
 
 
 class CreateSessionRequest(BaseModel):

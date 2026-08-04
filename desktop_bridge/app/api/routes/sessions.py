@@ -4,6 +4,9 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, status
 
 from app.models.events import BridgeEvent
+from app.models.git import SessionChangesResponse, SessionDiffResponse
+from app.services.approval_policy import classify_message
+from app.services.approval_store import approval_store
 from app.runtime.antigravity_cli import AntigravityCliError
 from app.models.sessions import (
     CreateSessionRequest,
@@ -11,6 +14,7 @@ from app.models.sessions import (
     SendMessageRequest,
     SessionRecord,
 )
+from app.services.git_service import GitServiceError, ensure_workspace_exists, get_git_status, get_unified_diff
 from app.services.runtime_registry import get_runtime_adapter
 from app.services.session_store import session_store
 from app.services.workspace_store import workspace_store
@@ -71,6 +75,42 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
     session = session_store.get(session_id)
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    workspace = workspace_store.get(session.workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+
+    approval_requirement = classify_message(request.message, workspace)
+    if approval_requirement.required:
+        approval = approval_store.create(
+            session_id=session_id,
+            action_type=approval_requirement.action_type or "runtime_message",
+            reason=approval_requirement.reason or "Sensitive action requires approval.",
+            risk_level=approval_requirement.risk_level or "medium",
+            message=request.message,
+            working_directory=workspace.absolute_path,
+            command=request.message,
+        )
+        updated = session.model_copy(
+            update={
+                "status": "waiting_approval",
+                "updated_at": datetime.now(UTC),
+                "pending_approval_id": approval.approval_id,
+            }
+        )
+        session_store.save(updated)
+        session_store.push_event(
+            BridgeEvent.approval_requested(
+                session_id=session_id,
+                task_id=None,
+                payload={
+                    "approvalId": approval.approval_id,
+                    "actionType": approval.action_type,
+                    "riskLevel": approval.risk_level,
+                    "reason": approval.reason,
+                },
+            )
+        )
+        return {"status": "waiting_approval", "approvalId": approval.approval_id}
 
     adapter = get_runtime_adapter()
     try:
@@ -86,6 +126,7 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
             "status": "active",
             "updated_at": datetime.now(UTC),
             "last_message_at": datetime.now(UTC),
+            "pending_approval_id": None,
         }
     )
     session_store.save(updated)
@@ -118,3 +159,44 @@ async def stop_session_task(session_id: str) -> dict[str, str]:
         )
     )
     return {"status": "stop_requested"}
+
+
+@router.get("/sessions/{session_id}/changes", response_model=SessionChangesResponse)
+async def get_session_changes(session_id: str) -> SessionChangesResponse:
+    session = session_store.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    workspace = workspace_store.get(session.workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    try:
+        ensure_workspace_exists(workspace.absolute_path)
+        git_status = get_git_status(workspace.absolute_path)
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return SessionChangesResponse(
+        sessionId=session_id,
+        repositoryRoot=git_status.repository_root,
+        changedFiles=git_status.entries,
+    )
+
+
+@router.get("/sessions/{session_id}/diff", response_model=SessionDiffResponse)
+async def get_session_diff(session_id: str) -> SessionDiffResponse:
+    session = session_store.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    workspace = workspace_store.get(session.workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    try:
+        ensure_workspace_exists(workspace.absolute_path)
+        diff_text = get_unified_diff(workspace.absolute_path)
+        git_status = get_git_status(workspace.absolute_path)
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return SessionDiffResponse(
+        sessionId=session_id,
+        repositoryRoot=git_status.repository_root,
+        diff=diff_text,
+    )
