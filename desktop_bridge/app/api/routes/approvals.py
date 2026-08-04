@@ -62,6 +62,20 @@ async def approve_request(approval_id: str) -> ApprovalDecisionResponse:
             payload={"preview": runtime_result.message_text[:400]},
         )
     )
+    session_store.push_event(
+        BridgeEvent.assistant_completed(
+            session_id=approval.session_id,
+            task_id=None,
+            payload={"message": runtime_result.message_text},
+        )
+    )
+    session_store.push_event(
+        BridgeEvent.activity_completed(
+            session_id=approval.session_id,
+            task_id=None,
+            payload={"activityType": approval.action_type, "status": "approved"},
+        )
+    )
     audit_log.append(
         "approval.executed",
         {
@@ -94,6 +108,13 @@ async def reject_request(approval_id: str) -> ApprovalDecisionResponse:
             session_id=approval.session_id,
             task_id=None,
             payload={"approvalId": approval.approval_id, "status": "rejected"},
+        )
+    )
+    session_store.push_event(
+        BridgeEvent.activity_completed(
+            session_id=approval.session_id,
+            task_id=None,
+            payload={"activityType": approval.action_type, "status": "rejected"},
         )
     )
     return ApprovalDecisionResponse(approval=resolved, result="rejected")

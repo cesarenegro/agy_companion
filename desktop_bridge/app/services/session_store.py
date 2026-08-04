@@ -27,5 +27,20 @@ class InMemorySessionStore:
     def list_events(self) -> list[BridgeEvent]:
         return list(self._events)
 
+    def list_events_for_session(
+        self,
+        session_id: str,
+        *,
+        after_event_id: str | None = None,
+        limit: int = 100,
+    ) -> list[BridgeEvent]:
+        events = [event for event in self._events if event.session_id == session_id]
+        if after_event_id:
+            for index, event in enumerate(events):
+                if event.event_id == after_event_id:
+                    events = events[index + 1 :]
+                    break
+        return events[:limit]
+
 
 session_store = InMemorySessionStore()

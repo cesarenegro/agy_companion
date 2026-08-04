@@ -40,6 +40,51 @@ class BridgeEvent(BaseModel):
         return cls._build(event_type="assistant.delta", session_id=session_id, task_id=task_id, payload=payload)
 
     @classmethod
+    def assistant_completed(
+        cls,
+        *,
+        session_id: str,
+        task_id: str | None,
+        payload: dict[str, Any],
+    ) -> "BridgeEvent":
+        return cls._build(
+            event_type="assistant.completed",
+            session_id=session_id,
+            task_id=task_id,
+            payload=payload,
+        )
+
+    @classmethod
+    def activity_started(
+        cls,
+        *,
+        session_id: str,
+        task_id: str | None,
+        payload: dict[str, Any],
+    ) -> "BridgeEvent":
+        return cls._build(
+            event_type="activity.started",
+            session_id=session_id,
+            task_id=task_id,
+            payload=payload,
+        )
+
+    @classmethod
+    def activity_completed(
+        cls,
+        *,
+        session_id: str,
+        task_id: str | None,
+        payload: dict[str, Any],
+    ) -> "BridgeEvent":
+        return cls._build(
+            event_type="activity.completed",
+            session_id=session_id,
+            task_id=task_id,
+            payload=payload,
+        )
+
+    @classmethod
     def task_status_changed(
         cls,
         *,

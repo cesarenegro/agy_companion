@@ -70,6 +70,23 @@ async def get_session(session_id: str) -> SessionRecord:
     return session
 
 
+@router.get("/sessions/{session_id}/events")
+async def get_session_events(
+    session_id: str,
+    after_event_id: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    session = session_store.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    events = session_store.list_events_for_session(
+        session_id,
+        after_event_id=after_event_id,
+        limit=max(1, min(limit, 200)),
+    )
+    return [event.model_dump(by_alias=True, mode="json") for event in events]
+
+
 @router.post("/sessions/{session_id}/messages")
 async def send_message(session_id: str, request: SendMessageRequest) -> dict[str, str]:
     session = session_store.get(session_id)
@@ -113,6 +130,13 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
         return {"status": "waiting_approval", "approvalId": approval.approval_id}
 
     adapter = get_runtime_adapter()
+    session_store.push_event(
+        BridgeEvent.activity_started(
+            session_id=session_id,
+            task_id=None,
+            payload={"activityType": "runtime_message", "displayName": request.message[:120]},
+        )
+    )
     try:
         runtime_result = await adapter.send_message(
             session_id=session.runtime_session_id or session.session_id,
@@ -135,6 +159,20 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
             session_id=session_id,
             task_id=None,
             payload={"preview": runtime_result.message_text[:400]},
+        )
+    )
+    session_store.push_event(
+        BridgeEvent.assistant_completed(
+            session_id=session_id,
+            task_id=None,
+            payload={"message": runtime_result.message_text},
+        )
+    )
+    session_store.push_event(
+        BridgeEvent.activity_completed(
+            session_id=session_id,
+            task_id=None,
+            payload={"activityType": "runtime_message", "status": "completed"},
         )
     )
     return {"status": "accepted", "response": runtime_result.message_text}
