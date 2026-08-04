@@ -18,6 +18,7 @@ class InMemoryApprovalStore:
         risk_level: str,
         message: str,
         working_directory: str,
+        runtime_action_id: str | None = None,
         command: str | None = None,
         affected_files: list[str] | None = None,
     ) -> ApprovalRecord:
@@ -26,7 +27,7 @@ class InMemoryApprovalStore:
             approvalId=f"apr_{uuid4().hex[:12]}",
             sessionId=session_id,
             taskId=None,
-            runtimeActionId=None,
+            runtimeActionId=runtime_action_id,
             actionType=action_type,
             command=command,
             workingDirectory=working_directory,

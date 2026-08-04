@@ -9,4 +9,5 @@ __pycache__/
 venv/
 dist/
 build/
-desktop_bridge/data/*.jsonl
+desktop_bridge/data/
+*.sqlite3

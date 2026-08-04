@@ -8,4 +8,9 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health")
 async def healthcheck() -> dict[str, str | bool]:
-    return {"status": "ok", "auditLogPath": audit_log.path, **get_runtime_status()}
+    return {
+        "status": "ok",
+        "auditLogPath": audit_log.jsonl_path,
+        "auditDbPath": audit_log.sqlite_path,
+        **get_runtime_status(),
+    }

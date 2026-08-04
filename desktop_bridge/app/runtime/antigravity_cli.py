@@ -4,12 +4,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from app.models.workspaces import WorkspaceRecord
-from app.runtime.base import AgentRuntimeAdapter, RuntimeMessageResult, RuntimeSession
+from app.runtime.base import AgentRuntimeAdapter, RuntimeAdapterError, RuntimeMessageResult, RuntimeSession
 
 
-class AntigravityCliError(RuntimeError):
+class AntigravityCliError(RuntimeAdapterError):
     """Raised when the local Antigravity CLI cannot satisfy a bridge request."""
 
 
@@ -54,11 +55,21 @@ class AntigravityCliAdapter(AgentRuntimeAdapter):
             or options.get("runtime_session_id")
             or self._config.default_conversation_id
         )
-        metadata = {
-            "workspacePath": workspace.absolute_path,
-            "adapter": "antigravity_cli",
-            "createMode": "resume_existing" if conversation_id else "bridge_only",
-        }
+        metadata: dict[str, Any]
+        if not conversation_id:
+            conversation_id, bootstrap_text = self._bootstrap_conversation(workspace)
+            metadata = {
+                "workspacePath": workspace.absolute_path,
+                "adapter": "antigravity_cli",
+                "createMode": "new_project_bootstrap",
+                "bootstrapResponse": bootstrap_text,
+            }
+        else:
+            metadata = {
+                "workspacePath": workspace.absolute_path,
+                "adapter": "antigravity_cli",
+                "createMode": "resume_existing",
+            }
         return RuntimeSession(runtime_session_id=conversation_id, metadata=metadata)
 
     async def send_message(
@@ -74,7 +85,7 @@ class AntigravityCliAdapter(AgentRuntimeAdapter):
                 "No Antigravity conversation id is configured for this bridge session."
             )
 
-        payload = self._run_print_mode(session_id=session_id, message=message)
+        payload = self._run_print_mode(session_id=session_id, message=message, stream=True)
         response_text = self._extract_response_text(payload)
         return RuntimeMessageResult(
             message_text=response_text,
@@ -134,7 +145,7 @@ class AntigravityCliAdapter(AgentRuntimeAdapter):
 
         return payload
 
-    def _run_print_mode(self, *, session_id: str, message: str) -> dict[str, Any]:
+    def _run_print_mode(self, *, session_id: str, message: str, stream: bool) -> dict[str, Any]:
         executable_path = Path(self._config.executable_path)
         if not executable_path.exists():
             raise AntigravityCliError(f"Antigravity CLI executable not found: {executable_path}")
@@ -143,12 +154,14 @@ class AntigravityCliAdapter(AgentRuntimeAdapter):
         env["ANTIGRAVITY_LS_ADDRESS"] = self._config.ls_address
         env["ANTIGRAVITY_CSRF_TOKEN"] = self._config.csrf_token
 
+        output_format = "stream-json" if stream else "json"
         completed = subprocess.run(
             [
                 str(executable_path),
                 "--print",
-                "--output-format=json",
+                f"--output-format={output_format}",
                 f"--conversation={session_id}",
+                "--prompt",
                 message,
             ],
             capture_output=True,
@@ -165,8 +178,77 @@ class AntigravityCliAdapter(AgentRuntimeAdapter):
         payload_text = stdout or stderr
         if payload_text.startswith("```json"):
             payload_text = payload_text.removeprefix("```json").removesuffix("```").strip()
-        payload = self._parse_payload(payload_text)
+        payload = self._parse_print_payload(payload_text)
         return payload
+
+    def _bootstrap_conversation(self, workspace: WorkspaceRecord) -> tuple[str, str]:
+        executable_path = Path(self._config.executable_path)
+        if not executable_path.exists():
+            raise AntigravityCliError(f"Antigravity CLI executable not found: {executable_path}")
+
+        before_ids = self._list_conversation_ids()
+        completed = subprocess.run(
+            [
+                str(executable_path),
+                "--print",
+                "--output-format=json",
+                "--new-project",
+                "--prompt",
+                "Reply with only: bridge bootstrap ready",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=workspace.absolute_path,
+        )
+        stdout = completed.stdout.strip()
+        stderr = completed.stderr.strip()
+        if completed.returncode != 0:
+            raise AntigravityCliError(stderr or stdout or "Failed to bootstrap a new Antigravity conversation.")
+
+        after_ids = self._list_conversation_ids()
+        new_ids = [conversation_id for conversation_id in after_ids if conversation_id not in before_ids]
+        if not new_ids:
+            newest = self._latest_conversation_id()
+            if newest is None:
+                raise AntigravityCliError("Unable to discover the new conversation id after bootstrap.")
+            conversation_id = newest
+        else:
+            conversation_id = new_ids[0]
+        return conversation_id, stdout or stderr
+
+    @staticmethod
+    def _conversation_dir() -> Path:
+        return Path(r"C:\Users\user\.gemini\antigravity-cli\conversations")
+
+    def _list_conversation_ids(self) -> list[str]:
+        directory = self._conversation_dir()
+        if not directory.exists():
+            return []
+        conversation_ids: list[str] = []
+        for item in directory.glob("*.db"):
+            try:
+                UUID(item.stem)
+            except ValueError:
+                continue
+            conversation_ids.append(item.stem)
+        return conversation_ids
+
+    def _latest_conversation_id(self) -> str | None:
+        directory = self._conversation_dir()
+        if not directory.exists():
+            return None
+        candidates = []
+        for item in directory.glob("*.db"):
+            try:
+                UUID(item.stem)
+            except ValueError:
+                continue
+            candidates.append(item)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0].stem
 
     @staticmethod
     def _parse_payload(payload_text: str) -> dict[str, Any]:
@@ -179,6 +261,15 @@ class AntigravityCliAdapter(AgentRuntimeAdapter):
         if not isinstance(parsed, dict):
             raise AntigravityCliError(f"Unexpected agent API payload type: {type(parsed).__name__}")
         return parsed
+
+    def _parse_print_payload(self, payload_text: str) -> dict[str, Any]:
+        stripped = payload_text.strip()
+        if not stripped:
+            return {}
+        try:
+            return self._parse_payload(stripped)
+        except AntigravityCliError:
+            return {"response": stripped}
 
     @staticmethod
     def _extract_response_text(payload: dict[str, Any]) -> str:

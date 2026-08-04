@@ -7,13 +7,14 @@ from app.models.events import BridgeEvent
 from app.models.git import SessionChangesResponse, SessionDiffResponse
 from app.services.approval_policy import classify_message
 from app.services.approval_store import approval_store
-from app.runtime.antigravity_cli import AntigravityCliError
 from app.models.sessions import (
     CreateSessionRequest,
     CreateSessionResponse,
     SendMessageRequest,
     SessionRecord,
 )
+from app.runtime.base import RuntimeAdapterError
+from app.runtime.official_sdk import validate_attachment_paths
 from app.services.git_service import GitServiceError, ensure_workspace_exists, get_git_status, get_unified_diff
 from app.services.runtime_registry import get_runtime_adapter
 from app.services.session_store import session_store
@@ -31,7 +32,7 @@ async def create_session(request: CreateSessionRequest) -> CreateSessionResponse
     adapter = get_runtime_adapter()
     try:
         runtime_session = await adapter.create_session(workspace=workspace, options=request.options)
-    except AntigravityCliError as exc:
+    except RuntimeAdapterError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     record = SessionRecord(
@@ -130,20 +131,28 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
         return {"status": "waiting_approval", "approvalId": approval.approval_id}
 
     adapter = get_runtime_adapter()
+    try:
+        resolved_attachments = validate_attachment_paths(workspace, request.attachments)
+    except RuntimeAdapterError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     session_store.push_event(
         BridgeEvent.activity_started(
             session_id=session_id,
             task_id=None,
-            payload={"activityType": "runtime_message", "displayName": request.message[:120]},
+            payload={
+                "activityType": "runtime_message",
+                "displayName": request.message[:120],
+                "attachmentCount": len(resolved_attachments),
+            },
         )
     )
     try:
         runtime_result = await adapter.send_message(
             session_id=session.runtime_session_id or session.session_id,
             message=request.message,
-            attachments=request.attachments,
+            attachments=resolved_attachments,
         )
-    except AntigravityCliError as exc:
+    except RuntimeAdapterError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     updated = session.model_copy(
         update={
@@ -153,14 +162,58 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
             "pending_approval_id": None,
         }
     )
-    session_store.save(updated)
-    session_store.push_event(
-        BridgeEvent.assistant_delta(
+    if runtime_result.approval_request is not None:
+        approval = approval_store.create(
             session_id=session_id,
-            task_id=None,
-            payload={"preview": runtime_result.message_text[:400]},
+            action_type=runtime_result.approval_request.action_type,
+            reason=runtime_result.approval_request.reason,
+            risk_level=runtime_result.approval_request.risk_level,
+            message=runtime_result.approval_request.message or request.message,
+            working_directory=runtime_result.approval_request.working_directory or workspace.absolute_path,
+            command=runtime_result.approval_request.command,
+            affected_files=runtime_result.approval_request.affected_files,
+            runtime_action_id=runtime_result.approval_request.runtime_action_id,
         )
-    )
+        waiting = updated.model_copy(
+            update={
+                "status": "waiting_approval",
+                "updated_at": datetime.now(UTC),
+                "pending_approval_id": approval.approval_id,
+            }
+        )
+        session_store.save(waiting)
+        session_store.push_event(
+            BridgeEvent.approval_requested(
+                session_id=session_id,
+                task_id=None,
+                payload={
+                    "approvalId": approval.approval_id,
+                    "actionType": approval.action_type,
+                    "riskLevel": approval.risk_level,
+                    "reason": approval.reason,
+                    "runtimeActionId": approval.runtime_action_id,
+                },
+            )
+        )
+        return {"status": "waiting_approval", "approvalId": approval.approval_id}
+    session_store.save(updated)
+    if runtime_result.stream_chunks:
+        for chunk in runtime_result.stream_chunks:
+            session_store.push_event(
+                BridgeEvent.assistant_delta(
+                    session_id=session_id,
+                    task_id=None,
+                    payload={"delta": chunk.text, "sequence": chunk.sequence},
+                )
+            )
+    else:
+        session_store.push_event(
+            BridgeEvent.assistant_delta(
+                session_id=session_id,
+                task_id=None,
+                payload={"preview": runtime_result.message_text[:400]},
+            )
+        )
     session_store.push_event(
         BridgeEvent.assistant_completed(
             session_id=session_id,
@@ -187,7 +240,7 @@ async def stop_session_task(session_id: str) -> dict[str, str]:
     adapter = get_runtime_adapter()
     try:
         await adapter.stop_task(task_id=session.runtime_session_id or session.active_task_id or session_id)
-    except AntigravityCliError as exc:
+    except RuntimeAdapterError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     session_store.push_event(
         BridgeEvent.task_status_changed(

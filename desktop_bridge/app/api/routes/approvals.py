@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.models.approvals import ApprovalDecisionResponse, ApprovalRecord
 from app.models.events import BridgeEvent
-from app.runtime.antigravity_cli import AntigravityCliError
+from app.runtime.base import RuntimeAdapterError
 from app.services.approval_store import approval_store
 from app.services.audit_log import audit_log
 from app.services.runtime_registry import get_runtime_adapter
@@ -32,12 +32,16 @@ async def approve_request(approval_id: str) -> ApprovalDecisionResponse:
 
     adapter = get_runtime_adapter()
     try:
-        runtime_result = await adapter.send_message(
-            session_id=session.runtime_session_id or session.session_id,
-            message=approval.message or "",
-            attachments=[],
-        )
-    except AntigravityCliError as exc:
+        runtime_result = None
+        if approval.runtime_action_id:
+            await adapter.approve_action(approval.runtime_action_id)
+        else:
+            runtime_result = await adapter.send_message(
+                session_id=session.runtime_session_id or session.session_id,
+                message=approval.message or "",
+                attachments=[],
+            )
+    except RuntimeAdapterError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     resolved = approval.model_copy(
@@ -48,6 +52,16 @@ async def approve_request(approval_id: str) -> ApprovalDecisionResponse:
         }
     )
     approval_store.save(resolved)
+    session_store.save(
+        session.model_copy(
+            update={
+                "status": "active",
+                "updated_at": datetime.now(UTC),
+                "last_message_at": datetime.now(UTC),
+                "pending_approval_id": None,
+            }
+        )
+    )
     session_store.push_event(
         BridgeEvent.approval_resolved(
             session_id=approval.session_id,
@@ -59,14 +73,14 @@ async def approve_request(approval_id: str) -> ApprovalDecisionResponse:
         BridgeEvent.assistant_delta(
             session_id=approval.session_id,
             task_id=None,
-            payload={"preview": runtime_result.message_text[:400]},
+            payload={"preview": runtime_result.message_text[:400] if runtime_result else ""},
         )
     )
     session_store.push_event(
         BridgeEvent.assistant_completed(
             session_id=approval.session_id,
             task_id=None,
-            payload={"message": runtime_result.message_text},
+            payload={"message": runtime_result.message_text if runtime_result else ""},
         )
     )
     session_store.push_event(
@@ -81,7 +95,7 @@ async def approve_request(approval_id: str) -> ApprovalDecisionResponse:
         {
             "approvalId": approval.approval_id,
             "sessionId": approval.session_id,
-            "responsePreview": runtime_result.message_text[:400],
+            "responsePreview": runtime_result.message_text[:400] if runtime_result else "",
         },
     )
     return ApprovalDecisionResponse(approval=resolved, result="approved")
@@ -94,6 +108,7 @@ async def reject_request(approval_id: str) -> ApprovalDecisionResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
     if approval.status != "pending":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Approval is not pending")
+    session = session_store.get(approval.session_id)
 
     resolved = approval.model_copy(
         update={
@@ -103,6 +118,16 @@ async def reject_request(approval_id: str) -> ApprovalDecisionResponse:
         }
     )
     approval_store.save(resolved)
+    if session is not None:
+        session_store.save(
+            session.model_copy(
+                update={
+                    "status": "idle",
+                    "updated_at": datetime.now(UTC),
+                    "pending_approval_id": None,
+                }
+            )
+        )
     session_store.push_event(
         BridgeEvent.approval_resolved(
             session_id=approval.session_id,

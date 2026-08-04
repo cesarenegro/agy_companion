@@ -1,18 +1,40 @@
 from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.workspaces import WorkspaceRecord
 
 
+class RuntimeAdapterError(RuntimeError):
+    """Base bridge error raised by a runtime adapter."""
+
+
 class RuntimeSession(BaseModel):
     runtime_session_id: str | None = None
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeApprovalRequest(BaseModel):
+    runtime_action_id: str | None = None
+    action_type: str
+    reason: str
+    risk_level: str
+    message: str | None = None
+    command: str | None = None
+    working_directory: str | None = None
+    affected_files: list[str] = Field(default_factory=list)
+
+
+class RuntimeStreamChunk(BaseModel):
+    text: str
+    sequence: int
 
 
 class RuntimeMessageResult(BaseModel):
-    message_text: str
-    metadata: dict[str, Any] = {}
+    message_text: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    stream_chunks: list[RuntimeStreamChunk] = Field(default_factory=list)
+    approval_request: RuntimeApprovalRequest | None = None
 
 
 class AgentRuntimeAdapter(Protocol):
